@@ -1,0 +1,11 @@
+= iTunes-playdar
+
+It kinda works :P
+
+== To Do
+
+See the top of the 'daaplaydar' file for a To do list
+
+== Copyright
+
+Copyright (c) 2009 JP Hastings-Spital. See LICENSE for details.

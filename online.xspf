@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<playlist version="1" xmlns="http://xspf.org/ns/0/">
+	<title>An (Online) XSPF Playlist</title>
+	<tracklist>
+		<track>
+			<title>Omen</title>
+			<creator>The Prodigy</creator>
+			<album>Invaders Must Die</album>
+		</track>
+	</tracklist>
+</playlist>

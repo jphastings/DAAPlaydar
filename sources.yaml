@@ -1,0 +1,21 @@
+# Each of the headings here must have a class inside the Playlist module
+# that can parse them
+Faker:
+    - Doesn't take any options! Gotta have something here tho
+
+Local:
+    # This source will search the directory below for any playlist
+    # files that can be understood. You can list multiple directories
+    - ./playlists
+
+XSPF: # I can't remember what they're called!
+    - http://path.to/a/playlist.xspf
+    - http://another.com/some/playlist.xspf
+    - online.xspf
+    - not_there.xspf
+    
+
+Playlick:
+    - Credentials:
+        username: Blah
+        password: Blah

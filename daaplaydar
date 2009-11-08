@@ -1,0 +1,277 @@
+#!/usr/bin/env ruby
+#
+# = DAAPlaydar
+# See any resolvable playlists you might have (online or on your machine) as a DAAP share in iTunes*, Songbird etc
+# * iTunes support isn't there yet, see below
+#
+# == Status
+# It doesn't work perfectly yet - there are a few problems:
+# - Because the request for the track is redirected straight to playdar's resolver the requests for specific ranges aren't honoured in DAAPlaydar and consequently you can't skip through tracks
+# - iTunes just doesn't like something about the mongrel/sinatra combo. Can't figure out what it is, I've had this server sending the same responses as mt-daapd to no avail.
+# - There needs to be a (minimal) web interface at the root (/) so people can at least have some feedback directly from DAAPlaydar (managing of playlists?)
+# - Playdar sids aren't persistent so if you leave a playlist and come back, the client won't know you're playing one of the songs listed
+# - Weird bug where playlists longer than 1 item have a 'Loading tracks' dialog left open in Songbird despite everything being loaded properly. Is it expecting more?
+# - I'm lazy, so I've hardcoded every file type as MP3. Need to do mimetype detection etc
+# - Needs more cowbell
+#
+require 'rubygems'
+require 'dnssd'
+require 'sinatra'
+require 'dmap'
+require 'PlaydARR'
+require 'playlists'
+
+# Setup
+LIBRARY_NAME = "DAAPlaydar"
+DAAPLAYDAR_VERSION = "0.0.1"
+
+mime :dmap, 'application/x-dmap-tagged'
+set  :port, 60211
+disable :logging
+
+# Query Playdar to see if its around
+begin
+  stats = PlaydARR::Server.stats
+  warn("Found Playdar v#{stats['version']}")
+rescue
+  raise "Playdar isn't running! Please start it first"
+end
+
+warn("Starting DAAPlaydar v#{DAAPLAYDAR_VERSION}")
+
+# Register Sinatra using DNS Service Discovery
+bonjour = DNSSD.register(LIBRARY_NAME, "_daap._tcp", nil, Sinatra::Application.port) do |r|
+  warn("Registered on Bonjour")
+end
+
+trap("INT"){ bonjour.stop }
+
+# Holds information about session ids etc
+class Connection
+  attr_reader :sid
+  @@sessions = {}
+  
+  def initialize
+    # Find an empty sid
+    @sid = rand(4095)
+    while @@sessions.has_key?(@sid)
+      @sid = rand(4095)
+    end
+    # Store information we would like to keep here
+    @@sessions[@sid] = {:foo => :bar}
+  end
+  
+  def self.session(sid)
+    # Returns the details of a session / a Connection instance?
+  end
+end
+
+# Holds information about playlistIDs etc
+class PlaylistMap
+  attr_reader :plid
+  @@map = {}
+  @@reverse = {}
+  
+  # We're assuming the remote IDs will be unique
+  def initialize(playlist)
+    uid = Digest::SHA1.hexdigest("#{playlist.object_id}:#{playlist.plid}")[0..15].unpack("Q")[0]
+    if @@reverse.has_key?(uid)
+      @plid = @@reverse[uid]
+      return
+    end
+    
+    # Find an empty plid
+    @plid = rand(8**8)
+    while @@map.has_key?(@sid)
+      @plid = rand(8**8)
+    end
+    # Store information we would like to keep here
+    @@map[@plid] = playlist
+    @@reverse[uid] = @plid
+  end
+  
+  def self.get_playlist(plid)
+    @@map[plid]
+  end
+end
+
+class Songs
+  attr_reader :sid
+  @@map = {}
+  @@reverse = {}
+  
+  # We're assuming the remote IDs will be unique
+  def initialize(resolve_url)
+    if @@reverse.has_key?(resolve_url)
+      @sid = @@reverse[resolve_url]
+      return
+    end
+    
+    # Find an empty sid
+    @sid = rand(8**8)
+    while @@map.has_key?(@sid)
+      @sid = rand(8**8)
+    end
+    # Store information we would like to keep here
+    @@map[@sid] = resolve_url
+    @@reverse[resolve_url] = @sid
+  end
+  
+  def self.get_url(sid)
+    @@map[sid]
+  end
+end
+
+before do
+  headers 'DAAP-Server' => "DAAPlaydar/#{DAAPLAYDAR_VERSION}"
+  content_type(:dmap)
+end
+
+get '/server-info' do
+  require 'pp'
+  DMAP::Element.new('msrv',[
+    DMAP::Element.new('mstt',200), # The HTTP Status Code for the server's current state
+    DMAP::Element.new('mpro',"0.2.0.0"), #DAAP Version
+    DMAP::Element.new('apro',"0.3.0.0"), # DMAP Version
+    DMAP::Element.new('minm',LIBRARY_NAME),
+    DMAP::Element.new('msau',0),
+    DMAP::Element.new('mstm',1800), # Timeout interval
+    DMAP::Element.new('msex',0), # Supports extensions
+    DMAP::Element.new('msix',0), # Supports Index
+    DMAP::Element.new('msbr',0), # Supports Browse
+    DMAP::Element.new('msqy',0), # Supports Query
+    DMAP::Element.new('msup',0), # Supports update
+    DMAP::Element.new('msdc',1) # Database Count
+  ]).to_dmap
+end
+
+get '/login' do
+  DMAP::Element.new('mlog',[
+    DMAP::Element.new('mstt',200),
+    DMAP::Element.new('mlid',Connection.new.sid)
+  ]).to_dmap
+end
+
+# There is only one database, it holds all the playlists
+get '/databases' do
+  DMAP::Element.new('avdb',[
+    DMAP::Element.new('mstt',200),
+    DMAP::Element.new('muty',0),
+    DMAP::Element.new('mtco',1), # Matched items
+    DMAP::Element.new('mrco',1), # Number in message
+    DMAP::Element.new('mlcl',[
+      DMAP::Element.new('mlit',[
+        DMAP::Element.new('miid',1),
+        DMAP::Element.new('mper',1),
+        DMAP::Element.new('minm',LIBRARY_NAME),
+        DMAP::Element.new('mimc',1), # No. songs in database - 0 will prevent Client from looking for any, 1 is enough to get them all
+        DMAP::Element.new('mctc',1)# Lie: Playlists.list.length) # No. of playlists in database - the call to Playlists might take some time, caching?
+      ])
+    ])
+  ]).to_dmap
+end
+
+# There's only one database, (Number 1)
+#
+# This is the requst for *all* songs on this DAAP server, unsure as to what to do here
+# maybe we just send the help mp3, and hope the client is clever enough to realise that
+# there are songs in the playlists that aren't in the full list?
+get '/databases/1/items' do
+  DMAP::Element.new('apso',[
+    DMAP::Element.new('mstt',200),
+    DMAP::Element.new('muty',0),
+    DMAP::Element.new('mtco',1),
+    DMAP::Element.new('mrco',1),
+    # This is a set response - the 'whole library' served by the DAAP server, seeing as our playlists are dynamic we're going to lie here and have the 'whole library' just populated with information (MP3s) on how to use DAAPlaydar
+    #DMAP::Element.new(StringIO.new("mlcl\000\000\004Fmlit\000\000\001\024mikd\000\000\000\001\002asdk\000\000\000\001\000asul\000\000\000\000asal\000\000\000\025Ready For The Weekendasar\000\000\000\rCalvin Harrisasbr\000\000\000\002\001@asda\000\000\000\004J\256xhasdm\000\000\000\004J\256xhasgn\000\000\000\vAlternativemiid\000\000\000\004\000Z/Hmper\000\000\000\b\000\000\000\000\000Z/Hasfm\000\000\000\003mp3asdt\000\000\000\016mp3 audio fileminm\000\000\000\bThe Rainassr\000\000\000\004\000\000\254Dassz\000\000\000\004\000\250\177\204asst\000\000\000\004\000\000\000\000assp\000\000\000\004\000\000\000\000astm\000\000\000\004\000\0046\365astn\000\000\000\002\000\001mikd\000\000\000\001\002asdk\000\000\000\001\000asul\000\000\000\000asal\000\000\000\025Ready For The Weekendasar\000\000\000\rCalvin Harrisasbr\000\000\000\002\001@asda\000\000\000\004J\256xhasdm\000\000\000\004J\256xhasgn\000\000\000\vAlternativemiid\000\000\000\004\000Z/Hmper\000\000\000\b\000\000\000\000\000Z/Hasfm\000\000\000\003mp3asdt\000\000\000\016mp3 audio fileminm\000\000\000\bThe Rainassr\000\000\000\004\000\000\254Dassz\000\000\000\004\000\250\177\204asst\000\000\000\004\000\000\000\000assp\000\000\000\004\000\000\000\000astm\000\000\000\004\000\0046\365astn\000\000\000\002\000\001mlit\000\000\001\amikd\000\000\000\001\002asdk\000\000\000\001\000asul\000\000\000\000asal\000\000\000\bThe Fameasar\000\000\000\tLady GaGaasbr\000\000\000\002\001@asda\000\000\000\004I\331\234\226asdm\000\000\000\004I\331\234\226asgn\000\000\000\003Popmiid\000\000\000\004\000ZV\\mper\000\000\000\b\000\000\000\000\000ZV\\asfm\000\000\000\003mp3asdt\000\000\000\016mp3 audio fileminm\000\000\000\nPoker Faceassr\000\000\000\004\000\000\254Dassz\000\000\000\004\000\221d\224asst\000\000\000\004\000\000\000\000assp\000\000\000\004\000\000\000\000astm\000\000\000\004\000\003\242\035astn\000\000\000\002\000\006asyr\000\000\000\002\a\330mikd\000\000\000\001\002asdk\000\000\000\001\000asul\000\000\000\000asal\000\000\000\bThe Fameasar\000\000\000\tLady GaGaasbr\000\000\000\002\001@asda\000\000\000\004I\331\234\226asdm\000\000\000\004I\331\234\226asgn\000\000\000\003Popmiid\000\000\000\004\000ZV\\mper\000\000\000\b\000\000\000\000\000ZV\\asfm\000\000\000\003mp3asdt\000\000\000\016mp3 audio fileminm\000\000\000\nPoker Faceassr\000\000\000\004\000\000\254Dassz\000\000\000\004\000\221d\224asst\000\000\000\004\000\000\000\000assp\000\000\000\004\000\000\000\000astm\000\000\000\004\000\003\242\035astn\000\000\000\002\000\006asyr\000\000\000\002\a\330"))
+    DMAP::Element.new('mlcl',[
+      DMAP::Element.new('mlit',[
+        DMAP::Element.new('mikd',2), # Music
+        DMAP::Element.new('miid',0),
+        DMAP::Element.new('mper',0),
+        DMAP::Element.new('minm',"How to use DAAPlaydar"),
+        DMAP::Element.new('asar',"JP"),
+        DMAP::Element.new('asal',""),
+        DMAP::Element.new('asfm','mp3'), # FIXME: parse mimetype
+        DMAP::Element.new('asbr',"128"),
+        DMAP::Element.new('astm',1950), # In ms
+        DMAP::Element.new('ascm',"How to use this DAAPlaydar service!")
+      ])
+    ])
+  ]).to_dmap
+end
+
+# Lists all the playlists
+get '/databases/1/containers' do
+  # This is where the magic is!
+  
+  DMAP::Element.new('apso',[
+    DMAP::Element.new('mstt',200),
+    DMAP::Element.new('muty',0),
+    DMAP::Element.new('mtco',1),
+    DMAP::Element.new('mrco',1),
+    DMAP::Element.new('mlcl',
+      Playlists.list.collect do |playlist|
+        plid = PlaylistMap.new(playlist).plid
+        DMAP::Element.new('mlit',[
+          DMAP::Element.new('miid',plid), # playlist ID
+          DMAP::Element.new('mper',plid), # playlist persistent ID
+          DMAP::Element.new('minm',playlist.title), # Playlist Name
+          DMAP::Element.new('mimc',1) # Items in playlist - can we lie about this? Elsewise we'll have to resolve all the playlists before we can send any data! YES! Songbird doesn't mind
+        ])
+      end
+    )
+  ]).to_dmap
+end
+
+# Lists the items in a playlist
+get '/databases/1/containers/:plid/items' do
+  tracks = DMAP::Element.new('mlcl')
+  # Find out the tracks that should be in this playlist
+  PlaylistMap.get_playlist(params[:plid].to_i).tracks.each do |track|
+    # Query playdar to see if this track is available
+    hits = PlaydARR::Server.search(track[:artist],track[:track],track[:album])
+    # Is there a decent hit on playdar?
+    
+    if hits.length > 0
+      best = hits[0] # FIXME: Do proper choosing
+      sid = Songs.new(best.resolve_uri).sid
+      track = DMAP::Element.new('mlit',[
+        DMAP::Element.new('mikd',2), # Music
+        DMAP::Element.new('miid',sid),
+        DMAP::Element.new('mper',sid),
+        DMAP::Element.new('minm',best.track),
+        DMAP::Element.new('asar',best.artist),
+        DMAP::Element.new('asal',best.album),
+        DMAP::Element.new('asfm','mp3'), # FIXME: parse mimetype
+        DMAP::Element.new('asbr',best.bitrate),
+        DMAP::Element.new('astm',hits[0].duration.to_i * 1000), # In ms
+        DMAP::Element.new('ascm',"Matched by Playdar\n score: #{best.score}\n source: #{best.source}")
+      ])
+      tracks.push track
+    else
+      warn("Playdar couldn't find a match for \"#{track[:track]}\" #{track[:artist]} (#{track[:album]})")
+    end
+  end
+  
+  DMAP::Element.new('apso',[
+    DMAP::Element.new('mstt',200),
+    DMAP::Element.new('muty',0),
+    DMAP::Element.new('mtco',1),
+    DMAP::Element.new('mrco',1),
+    tracks
+  ]).to_dmap
+end
+
+get '/databases/*/items/0.mp3' do
+  redirect("/instructions.mp3")
+end
+
+get '/databases/1/items/:sid.mp3' do
+  redirect(Songs.get_url(params[:sid].to_i))
+end
+
+get '/' do
+  content_type(:html)
+  "WOOOOO! DAAPlaydar!"
+end
