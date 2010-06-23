@@ -1,6 +1,6 @@
 = iTunes-playdar
 
-It kinda works :P
+It kinda works :P (it's also a bit crap!)
 
 == To Do
 
